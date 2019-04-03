@@ -39,7 +39,7 @@ add_compile_options("-fPIC")
 
 # TODO CL_TARGET_OPENCL_VERSION is not defined..
 if (${XRT_NATIVE_BUILD} STREQUAL "yes")
-  add_compile_options("-Wall" "-Werror")
+  add_compile_options("-Wall")
 endif()
 add_subdirectory(xdp)
 

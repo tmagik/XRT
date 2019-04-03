@@ -52,6 +52,8 @@ getPlatform()
   return "x86_64";
 #elif defined(__powerpc64__)
   return "ppc64le";
+#elif defined(__riscv)
+  return "riscv";
 #else
 # error("No driver directory for platform")
 #endif

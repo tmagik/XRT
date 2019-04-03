@@ -46,7 +46,7 @@
 #endif
 
 /* use simple wait queue (swaitq) with newer kernels */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0) && LINUX_VERSION_CODE <= KERNEL_VERSION(4, 18, 0)
 #include <linux/swait.h>
 
 #define qdma_wait_queue			struct swait_queue_head

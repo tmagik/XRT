@@ -20,10 +20,10 @@
  * kernels do not support FPGA Mgr yet.
  */
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+/*#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #define FPGA_MGR_SUPPORT
 #include <linux/fpga/fpga-mgr.h>
-#endif
+#endif */
 
 #include "../xocl_drv.h"
 #include "xclbin.h"

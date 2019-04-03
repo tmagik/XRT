@@ -11,7 +11,7 @@ if (XMA_VERBOSE)
 endif()
 
 add_compile_options("-fPIC")
-add_compile_options("-Wall" "-Werror")
+add_compile_options("-Wall")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DXMA_RES_TEST -DXMA_DEBUG")
 
 add_subdirectory(src)

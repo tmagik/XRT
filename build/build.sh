@@ -3,8 +3,8 @@
 set -e
 
 OSDIST=`lsb_release -i |awk -F: '{print tolower($2)}' | tr -d ' \t'`
-BUILDDIR=$(readlink -f $(dirname ${BASH_SOURCE[0]}))
-CORE=`grep -c ^processor /proc/cpuinfo`
+BUILDDIR=$(readlink -f $(dirname $0}))
+CORE=4
 CMAKE=cmake
 
 if [[ $OSDIST == "centos" ]]; then
