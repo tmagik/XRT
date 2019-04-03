@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2018 Xilinx, Inc
+ * Copyright (C) 2016-2019 Xilinx, Inc
  * Author(s): Hem C. Neema
  *          : Min Ma
  * ZNYQ HAL Driver layered on top of ZYNQ kernel driver
@@ -29,12 +29,17 @@
 
 namespace ZYNQ {
 
+// Forward declaration
+class ZYNQShimProfiling ;
+
 class ZYNQShim {
 
   static const int BUFFER_ALIGNMENT = 0x80; // TODO: UKP
 public:
   ~ZYNQShim();
   ZYNQShim(unsigned index, const char *logfileName, xclVerbosityLevel verbosity);
+  ZYNQShimProfiling* profiling ;
+
   // Raw read/write
   size_t xclWrite(xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size);
   size_t xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size);
@@ -51,6 +56,11 @@ public:
   unsigned int xclGetBOProperties(unsigned int boHandle, xclBOProperties *properties);
   int xclExecBuf(unsigned int cmdBO);
   int xclExecWait(int timeoutMilliSec);
+  int xclSKGetCmd(xclSKCmd *cmd);
+  int xclSKCreate(unsigned int boHandle, uint32_t cu_idx);
+  int xclSKReport(uint32_t cu_idx, xrt_scu_state state);
+
+  uint xclGetNumLiveProcesses();
 
   int xclGetSysfsPath(const char* subdev, const char* entry, char* sysfPath, size_t size);
 

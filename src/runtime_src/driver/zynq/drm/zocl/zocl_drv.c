@@ -30,6 +30,7 @@
 #include <linux/of_irq.h>
 #include <linux/spinlock.h>
 #include "zocl_drv.h"
+#include "zocl_sk.h"
 #include "sched_exec.h"
 
 #define ZOCL_DRIVER_NAME        "zocl"
@@ -427,6 +428,12 @@ static const struct drm_ioctl_desc zocl_ioctls[] = {
 			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(ZOCL_READ_AXLF, zocl_read_axlf_ioctl,
 			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(ZOCL_SK_GETCMD, zocl_sk_getcmd_ioctl,
+			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(ZOCL_SK_CREATE, zocl_sk_create_ioctl,
+			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(ZOCL_SK_REPORT, zocl_sk_report_ioctl,
+			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
 #if defined(XCLBIN_DOWNLOAD)
 	DRM_IOCTL_DEF_DRV(ZOCL_PCAP_DOWNLOAD, zocl_pcap_download_ioctl,
 			DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW)
@@ -517,7 +524,7 @@ static int zocl_drm_platform_probe(struct platform_device *pdev)
 		irq = platform_get_irq(pdev, index);
 		if (irq < 0)
 			break;
-		DRM_INFO("CU(%d) IRQ %d\n", index, irq);
+		DRM_DEBUG("CU(%d) IRQ %d\n", index, irq);
 		zdev->irq[index] = irq;
 	}
 	zdev->cu_num = index;

@@ -233,7 +233,9 @@ public:
     size_t xclDebugReadCounters(xclDebugCountersResults* debugResult);
     size_t xclDebugReadCheckers(xclDebugCheckersResults* checkerResult);
     size_t xclDebugReadStreamingCounters(xclStreamingDebugCountersResults* streamingResult);
+    size_t xclDebugReadStreamingCheckers(xclDebugStreamingCheckersResults* streamingCheckerResult);
     size_t xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult);
+
 
     // Trace
     size_t xclPerfMonStartTrace(xclPerfMonType type, uint32_t startTrigger);
@@ -241,7 +243,8 @@ public:
     uint32_t xclPerfMonGetTraceCount(xclPerfMonType type);
     size_t xclPerfMonReadTrace(xclPerfMonType type, xclTraceResultsVector& traceVector);
 
-    // Experimental sysfs API
+    // APIs using sysfs information
+    uint xclGetNumLiveProcesses();
     int xclGetSysfsPath(const char* subdev, const char* entry, char* sysfsPath, size_t size);
 
     // Experimental debug profile device data API
@@ -273,6 +276,9 @@ public:
     // Temporary hack for xbflash use only
     char *xclMapMgmt(void) { return mMgtMap; }
     xclDeviceHandle xclOpenMgmt(unsigned deviceIndex, const char *logFileName, xclVerbosityLevel level);
+
+    int xclMPD(struct drm_xocl_sw_mailbox *args);
+    int xclMSD(struct drm_xocl_sw_mailbox *args);
 
 private:
     xclVerbosityLevel mVerbosity;
@@ -356,6 +362,7 @@ private:
     // Performance monitoring helper functions
     bool isDSAVersion(unsigned majorVersion, unsigned minorVersion, bool onlyThisVersion);
     unsigned getBankCount();
+    signed cmpMonVersions(unsigned major1, unsigned minor1, unsigned major2, unsigned minor2);
     uint64_t getHostTraceTimeNsec();
     uint64_t getPerfMonBaseAddress(xclPerfMonType type, uint32_t slotNum);
     uint64_t getPerfMonFifoBaseAddress(xclPerfMonType type, uint32_t fifonum);
@@ -376,6 +383,7 @@ private:
     // Information extracted from platform linker
     bool mIsDebugIpLayoutRead = false;
     bool mIsDeviceProfiling = false;
+    uint8_t mTraceFifoProperties = 0;
     uint64_t mPerfMonFifoCtrlBaseAddress = 0;
     uint64_t mPerfMonFifoReadBaseAddress = 0;
     uint64_t mTraceFunnelAddress = 0;

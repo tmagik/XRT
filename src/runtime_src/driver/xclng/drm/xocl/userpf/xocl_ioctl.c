@@ -16,7 +16,7 @@
  */
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(3,0,0)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 0, 0)
 #include <drm/drm_backport.h>
 #endif
 #include <drm/drmP.h>
@@ -186,21 +186,58 @@ xocl_read_sect(enum axlf_section_kind kind, void **sect, struct axlf *axlf_full)
 }
 
 /*
- * Should be called with xdev->ctx_list_lock held
+ * Return number of client with open ("live") contexts on CUs.
+ * If this number > 0, xclbin is locked down.
+ * If plist is non-NULL, the list of PIDs of live clients will also be returned.
+ * Note that plist should be freed by caller.
  */
-static uint live_client_size(struct xocl_dev *xdev)
+static uint live_clients(struct xocl_dev *xdev, pid_t **plist)
 {
 	const struct list_head *ptr;
 	const struct client_ctx *entry;
 	uint count = 0;
+	uint i = 0;
+	pid_t *pl = NULL;
 
-	BUG_ON(!mutex_is_locked(&xdev->ctx_list_lock));
+	BUG_ON(!mutex_is_locked(&xdev->dev_lock));
+
+	/* Find out number of active client */
+	list_for_each(ptr, &xdev->ctx_list) {
+		entry = list_entry(ptr, struct client_ctx, link);
+		if (CLIENT_NUM_CU_CTX(entry) > 0)
+			count++;
+	}
+	if (count == 0 || plist == NULL)
+		goto out;
+
+	/* Collect list of PIDs of active client */
+	pl = (pid_t *)vmalloc(sizeof(pid_t) * count);
+	if (pl == NULL)
+		goto out;
 
 	list_for_each(ptr, &xdev->ctx_list) {
 		entry = list_entry(ptr, struct client_ctx, link);
-		count++;
+		if (CLIENT_NUM_CU_CTX(entry) > 0) {
+			pl[i] = pid_nr(entry->pid);
+			i++;
+		}
 	}
+
+	*plist = pl;
+
+out:
 	return count;
+}
+
+u32 get_live_clients(struct xocl_dev *xdev, pid_t **plist)
+{
+	u32 c;
+
+	mutex_lock(&xdev->dev_lock);
+	c = live_clients(xdev, plist);
+	mutex_unlock(&xdev->dev_lock);
+
+	return c;
 }
 
 static int
@@ -211,13 +248,13 @@ xocl_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr)
 	struct axlf bin_obj;
 	size_t size;
 	int preserve_mem = 0;
-	struct mem_topology *new_topology, *topology;
+	struct mem_topology *new_topology = NULL, *topology;
 	struct xocl_dev *xdev = drm_p->xdev;
 	xuid_t *xclbin_id;
 
 	userpf_info(xdev, "READ_AXLF IOCTL\n");
 
-	if(!xocl_is_unified(xdev)) {
+	if (!xocl_is_unified(xdev)) {
 		printk(KERN_INFO "XOCL: not unified dsa");
 		return err;
 	}
@@ -232,31 +269,35 @@ xocl_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr)
 		return -EINVAL;
 
 	if (uuid_is_null(&bin_obj.m_header.uuid)) {
-		// Legacy xclbin, convert legacy id to new id
+		/* Legacy xclbin, convert legacy id to new id */
 		memcpy(&bin_obj.m_header.uuid, &bin_obj.m_header.m_timeStamp, 8);
 	}
 
-	xclbin_id = (xuid_t *)xocl_icap_get_data(xdev, XCLBIN_UUID);
+	xclbin_id = XOCL_XCLBIN_ID(xdev);
 	if (!xclbin_id)
 		return -EINVAL;
+
 	/*
 	 * Support for multiple processes
-	 * 1. We lock &xdev->ctx_list_lock so no new contexts can be opened and no live contexts
-	 *    can be closed
-	 * 2. If more than one context exists -- more than one clients are connected -- we cannot
-	 *    swap the xclbin return -EPERM
-	 * 3. If no live contexts exist there may still be sumbitted exec BOs from a
-	 *    previous context (which was subsequently closed), hence we check for exec BO count.
-	 *    If exec BO are outstanding we return -EBUSY
+	 * 1. We lock &xdev->dev_lock so no new contexts can be opened and no
+	 *    live contexts can be closed
+	 * 2. If more than one live context exists, we cannot swap xclbin
+	 * 3. If no live contexts exists, there may still be sumbitted exec
+	 *    BOs from a previous context (which was subsequently closed, but
+	 *    the BOs were stuck). If exec BO count > 0, we cannot swap xclbin
+	 *
+	 * Note that icap subdevice also maintains xclbin ref count, which is
+	 * used to lock down xclbin on mgmt pf side.
 	 */
 	if (!uuid_equal(xclbin_id, &bin_obj.m_header.uuid)) {
-		if (atomic_read(&xdev->outstanding_execs)) {
+		if (live_clients(xdev, NULL) ||
+			atomic_read(&xdev->outstanding_execs)) {
 			printk(KERN_ERR "Current xclbin is busy, can't change\n");
 			return -EBUSY;
 		}
 	}
 
-	//Ignore timestamp matching for AWS platform
+	/* Ignore timestamp matching for AWS platform */
 	if (!xocl_is_aws(xdev) && !xocl_verify_timestamp(xdev,
 		bin_obj.m_header.m_featureRomTimeStamp)) {
 		printk(KERN_ERR "TimeStamp of ROM did not match Xclbin\n");
@@ -270,7 +311,7 @@ xocl_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr)
 		goto done;
 	}
 
-	//Copy from user space and proceed.
+	/* Copy from user space and proceed. */
 	axlf = vmalloc(bin_obj.m_header.m_length);
 	if (!axlf) {
 		DRM_ERROR("Unable to create axlf\n");
@@ -302,28 +343,25 @@ xocl_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr)
 	 * Ignore this and keep disable preserve_mem if not for aws.
 	 */
 	if (xocl_is_aws(xdev) && (topology != NULL)) {
-		if ( (size == sizeof_sect(topology, m_mem_data)) &&
-		    !memcmp(new_topology, topology, size) ) {
-			xocl_xdev_info(xdev,"MEM_TOPOLOGY match,"
-				       "preserve mem_topology.");
+		if ((size == sizeof_sect(topology, m_mem_data)) &&
+		    !memcmp(new_topology, topology, size)) {
+			xocl_xdev_info(xdev, "MEM_TOPOLOGY match, preserve mem_topology.");
 			preserve_mem = 1;
 		} else {
-			xocl_xdev_info(xdev, "MEM_TOPOLOGY mismatch,"
-				       "do not preserve mem_topology.");
+			xocl_xdev_info(xdev, "MEM_TOPOLOGY mismatch, do not preserve mem_topology.");
 		}
 	}
 
 	/* Switching the xclbin, make sure none of the buffers are used. */
 	if (!preserve_mem) {
-		err = xocl_check_topology(drm_p);
-		if(err)
+		err = xocl_cleanup_mem(drm_p);
+		if (err)
 			goto done;
-		xocl_cleanup_mem(drm_p);
 	}
 
 	err = xocl_icap_download_axlf(xdev, axlf);
 	if (err) {
-		DRM_ERROR("%s Fail to download \n", __FUNCTION__);
+		DRM_ERROR("%s Fail to download\n", __func__);
 		/*
 		 * Don't just bail out here, always recreate drm mem
 		 * since we have cleaned it up before download.
@@ -354,36 +392,17 @@ int xocl_read_axlf_ioctl(struct drm_device *dev,
 	struct drm_xocl_axlf *axlf_obj_ptr = data;
 	struct xocl_drm *drm_p = dev->dev_private;
 	struct xocl_dev *xdev = drm_p->xdev;
-	struct client_ctx *client = filp->driver_priv;
 	int err = 0;
-	xuid_t *xclbin_id;
 
-	mutex_lock(&xdev->ctx_list_lock);
+	mutex_lock(&xdev->dev_lock);
 	err = xocl_read_axlf_helper(drm_p, axlf_obj_ptr);
-	/*
-	 * Record that user land configured this context for current device xclbin
-	 * It doesn't mean that the context has a lock on the xclbin, only that
-	 * when a lock is eventually acquired it can be verified to be against to
-	 * be a lock on expected xclbin
-	 */
-	xclbin_id = (xuid_t *)xocl_icap_get_data(xdev, XCLBIN_UUID);
-	uuid_copy(&client->xclbin_id,
-			((err || !xclbin_id) ? &uuid_null : xclbin_id));
-	mutex_unlock(&xdev->ctx_list_lock);
+	mutex_unlock(&xdev->dev_lock);
 	return err;
-}
-
-uint get_live_client_size(struct xocl_dev *xdev) {
-	uint count;
-	mutex_lock(&xdev->ctx_list_lock);
-	count = live_client_size(xdev);
-	mutex_unlock(&xdev->ctx_list_lock);
-	return count;
 }
 
 void reset_notify_client_ctx(struct xocl_dev *xdev)
 {
-	xdev->needs_reset=false;
+	xdev->needs_reset = false;
 	wmb();
 }
 
@@ -392,11 +411,15 @@ int xocl_hot_reset_ioctl(struct drm_device *dev, void *data,
 {
 	struct xocl_drm *drm_p = dev->dev_private;
 	struct xocl_dev *xdev = drm_p->xdev;
+	int delay_jiffies;
 
-	int err = xocl_hot_reset(xdev, false);
+	xocl_drvinst_offline(xdev, true);
+	delay_jiffies = msecs_to_jiffies(XOCL_RESET_DELAY);
+	schedule_delayed_work(&xdev->core.reset_work, delay_jiffies);
 
-	printk(KERN_INFO "%s err: %d\n", __FUNCTION__, err);
-	return err;
+	xocl_xdev_info(xdev, "Scheduled reset");
+
+	return 0; 
 }
 
 int xocl_reclock_ioctl(struct drm_device *dev, void *data,
@@ -406,6 +429,22 @@ int xocl_reclock_ioctl(struct drm_device *dev, void *data,
 	struct xocl_dev *xdev = drm_p->xdev;
 	int err = xocl_reclock(xdev, data);
 
-	printk(KERN_INFO "%s err: %d\n", __FUNCTION__, err);
+	printk(KERN_INFO "%s err: %d\n", __func__, err);
 	return err;
 }
+
+int xocl_sw_mailbox_ioctl(struct drm_device *dev, void *data,
+	struct drm_file *filp)
+{
+	int ret = 0;
+	struct xocl_drm *drm_p = dev->dev_private;
+	struct xocl_dev *xdev = drm_p->xdev;
+
+	struct drm_xocl_sw_mailbox *args;
+	args = (struct drm_xocl_sw_mailbox *)data;
+
+	/* 0 is a successful transfer */
+	ret = xocl_mailbox_sw_transfer(xdev, args);
+	return ret;
+}
+

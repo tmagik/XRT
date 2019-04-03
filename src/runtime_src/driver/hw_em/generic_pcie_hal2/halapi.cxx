@@ -19,10 +19,6 @@
  */
 
 #include <shim.h>
-#include "driver/xclng/xrt/util/scheduler.h"
-
-//########################################## THESE HAS TO BE DEFINED START ##########################################
-
 
 int xclExportBO(xclDeviceHandle handle, unsigned int boHandle)
 {
@@ -45,9 +41,6 @@ int xclCopyBO(xclDeviceHandle handle, unsigned int dst_boHandle, unsigned int sr
   xclhwemhal2::HwEmShim *drv = xclhwemhal2::HwEmShim::handleCheck(handle);
   return drv ? drv->xclCopyBO(dst_boHandle, src_boHandle, size, dst_offset, src_offset) : -ENODEV;
 }
-
-
-//########################################## THESE HAS TO BE DEFINED END ##########################################
 
 int xclResetDevice(xclDeviceHandle handle, xclResetKind kind)
 {
@@ -141,6 +134,21 @@ int xclExecBuf(xclDeviceHandle handle, unsigned int cmdBO)
     return -1;
   return drv->xclExecBuf(cmdBO);
 }
+
+
+//defining following two functions as they gets called in scheduler init call
+int xclOpenContext(xclDeviceHandle handle, uuid_t xclbinId, unsigned int ipIndex, bool shared)
+  
+{
+  return 0;
+}
+
+int xclCloseContext(xclDeviceHandle handle, uuid_t xclbinId, unsigned ipIndex)
+{
+  return 0;
+}
+
+
 
 int xclRegisterEventNotify(xclDeviceHandle handle, unsigned int userInterrupt, int fd)
 {
@@ -450,6 +458,19 @@ size_t xclPerfMonReadTrace(xclDeviceHandle handle, xclPerfMonType type, xclTrace
   return drv->xclPerfMonReadTrace(type,traceVector);
 }
 
+ssize_t xclUnmgdPwrite(xclDeviceHandle handle, unsigned flags, const void *buf, size_t count, uint64_t offset)
+{
+  xclhwemhal2::HwEmShim *drv = xclhwemhal2::HwEmShim::handleCheck(handle);
+  return drv ? drv->xclUnmgdPwrite(flags, buf, count, offset) : -ENODEV;
+}
+
+ssize_t xclUnmgdPread(xclDeviceHandle handle, unsigned flags, void *buf, size_t count, uint64_t offset)
+{
+  xclhwemhal2::HwEmShim *drv = xclhwemhal2::HwEmShim::handleCheck(handle);
+  return drv ? drv->xclUnmgdPread(flags, buf, count, offset) : -ENODEV;
+}
+
+
 //QDMA Support
 //
 
@@ -499,3 +520,23 @@ int xclPollCompletion(xclDeviceHandle handle, int min_compl, int max_compl, xclR
    xclhwemhal2::HwEmShim *drv = xclhwemhal2::HwEmShim::handleCheck(handle);
   return drv ? drv->xclPollCompletion(min_compl, max_compl, comps, actual, timeout) : -ENODEV;
 }
+
+/*
+ * API to get number of live processes. 
+ * Applicable only for System Flow as it supports Multiple processes on same device.
+ * For Hardware Emulation, return 0
+ */
+uint xclGetNumLiveProcesses(xclDeviceHandle handle)
+{
+    return 0;
+}
+
+int xclLogMsg(xclDeviceHandle handle, xclLogMsgLevel level, const char* tag, const char* format, ...)
+{
+  va_list args;
+  va_start(args, format);
+  int ret = xclhwemhal2::HwEmShim::xclLogMsg(handle, level, tag, format, args);
+  va_end(args);
+  return ret;
+}
+

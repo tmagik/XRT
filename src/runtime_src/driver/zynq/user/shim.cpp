@@ -18,6 +18,7 @@
  */
 
 #include "shim.h"
+#include "shim-profile.h"
 #include <errno.h>
 
 #include <iostream>
@@ -31,9 +32,10 @@
 #include <unistd.h>
 #include <vector>
 #include <poll.h>
+#include "driver/common/message.h"
+#include "driver/common/scheduler.h"
 //#include "xclbin.h"
 #include <assert.h>
-
 
 #define GB(x)   ((size_t) (x) << 30)
 #ifdef __aarch64__
@@ -104,9 +106,11 @@ inline void* wordcopy(void *dst, const void* src, size_t bytes)
 
 namespace ZYNQ {
 ZYNQShim::ZYNQShim(unsigned index, const char *logfileName, xclVerbosityLevel verbosity) :
+    profiling(nullptr),
     mBoardNumber(index),
     mVerbosity(verbosity)
 {
+  profiling = new ZYNQShimProfiling(this);
   //TODO: Use board number
   mKernelFD = open("/dev/dri/renderD128", O_RDWR);
   if(mKernelFD) {
@@ -129,6 +133,7 @@ ZYNQShim::ZYNQShim(unsigned index, const char *logfileName, xclVerbosityLevel ve
 #ifndef __HWEM__
 ZYNQShim::~ZYNQShim()
 {
+  if (profiling != nullptr) delete profiling;
   //TODO
   if (mKernelFD > 0) {
     close(mKernelFD);
@@ -149,7 +154,7 @@ size_t ZYNQShim::xclWrite(xclAddressSpace space, uint64_t offset, const void *ho
     return -1;
   }
 
-  if(XCL_ADDR_KERNEL_CTRL == space) {
+  if(XCL_ADDR_KERNEL_CTRL == space || XCL_ADDR_SPACE_DEVICE_PERFMON == space) {
     // Temp fix for offset issue. TODO: Umang
     if(offset >= BASE_ADDRESS )
       offset = offset - BASE_ADDRESS;
@@ -166,7 +171,7 @@ size_t ZYNQShim::xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, 
     return -1;
   }
 
-  if(XCL_ADDR_KERNEL_CTRL == space) {
+  if(XCL_ADDR_KERNEL_CTRL == space || XCL_ADDR_SPACE_DEVICE_PERFMON == space) {
     // Temp fix for offset issue. TODO: Umang
     if(offset >= BASE_ADDRESS )
       offset = offset - BASE_ADDRESS;
@@ -449,6 +454,11 @@ int ZYNQShim::xclExecWait(int timeoutMilliSec)
   return poll(&uifdVector[0], uifdVector.size(), timeoutMilliSec);
 }
 
+uint ZYNQShim::xclGetNumLiveProcesses()
+{
+  return 0;
+}
+
 int ZYNQShim::xclGetSysfsPath(const char* subdev, const char* entry, char* sysfsPath, size_t size)
 {
   // Until we have a programmatic way to determine what this directory
@@ -463,6 +473,55 @@ int ZYNQShim::xclGetSysfsPath(const char* subdev, const char* entry, char* sysfs
   //  terminating byte.
   strncpy(sysfsPath, path.c_str(), size) ;
   return 0 ;
+}
+
+int ZYNQShim::xclSKGetCmd(xclSKCmd *cmd)
+{
+  int ret;
+  drm_zocl_sk_getcmd scmd;
+
+  ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_SK_GETCMD, &scmd);
+
+  if (!ret) {
+    cmd->opcode = scmd.opcode;
+    cmd->start_cuidx = scmd.start_cuidx;
+    cmd->cu_nums = scmd.cu_nums;
+    cmd->xclbin_paddr = scmd.paddr;
+    cmd->xclbin_size = scmd.size;
+    snprintf(cmd->krnl_name, ZOCL_MAX_NAME_LENGTH, "%s", scmd.name);
+  }
+
+  return ret;
+}
+
+int ZYNQShim::xclSKCreate(unsigned int boHandle, uint32_t cu_idx)
+{
+  int ret;
+  drm_zocl_sk_create scmd = {cu_idx, boHandle};
+
+  ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_SK_CREATE, &scmd);
+
+  return ret;
+}
+
+int ZYNQShim::xclSKReport(uint32_t cu_idx, xrt_scu_state state)
+{
+  int ret;
+  drm_zocl_sk_report scmd;
+
+  switch (state) {
+  case XRT_SCU_STATE_DONE:
+    scmd.cu_state = ZOCL_SCU_STATE_DONE;
+    break;
+  default:
+    return -EINVAL;
+  }
+
+  scmd.cu_idx = cu_idx;
+  
+  ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_SK_REPORT, &scmd);
+
+  return ret;
 }
 
 }
@@ -612,10 +671,11 @@ unsigned int xclImportBO(xclDeviceHandle handle, int fd, unsigned flags) {
 
 int xclLoadXclBin(xclDeviceHandle handle, const xclBin *buffer)
 {
-  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
-    if (!drv)
-        return -EINVAL;
-    return drv->xclLoadXclBin(buffer);
+    ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+    auto ret = drv ? drv->xclLoadXclBin(buffer) : -ENODEV;
+    if (!ret)
+        ret = xrt_core::scheduler::init(handle,buffer);
+    return ret;
 }
 
 size_t xclWrite(xclDeviceHandle handle, xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size)
@@ -682,6 +742,14 @@ int xclExecWait(xclDeviceHandle handle, int timeoutMilliSec)
   return drv->xclExecWait(timeoutMilliSec);
 }
 
+uint xclGetNumLiveProcesses(xclDeviceHandle handle)
+{
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return 0;
+  return drv->xclGetNumLiveProcesses();
+}
+
 int xclGetSysfsPath(xclDeviceHandle handle, const char* subdev, 
 		    const char* entry, char* sysfsPath, size_t size)
 {
@@ -689,6 +757,31 @@ int xclGetSysfsPath(xclDeviceHandle handle, const char* subdev,
   if (!drv)
     return -EINVAL;
   return drv->xclGetSysfsPath(subdev, entry, sysfsPath, size);
+}
+
+int xclSKGetCmd(xclDeviceHandle handle, xclSKCmd *cmd)
+{
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -EINVAL;
+  return drv->xclSKGetCmd(cmd);
+}
+
+int xclSKCreate(xclDeviceHandle handle, unsigned int boHandle, uint32_t cu_idx)
+{
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -EINVAL;
+  return drv->xclSKCreate(boHandle, cu_idx);
+}
+
+int xclSKReport(xclDeviceHandle handle, uint32_t cu_idx, xrt_scu_state state)
+{
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -EINVAL;
+
+  return drv->xclSKReport(cu_idx, state);
 }
 
 //
@@ -714,56 +807,107 @@ double xclGetDeviceClockFreqMHz(xclDeviceHandle handle)
 }
 double xclGetReadMaxBandwidthMBps(xclDeviceHandle handle)
 {
-  return 0;
+  return 9600.0 ; // Needs to be adjusted to SoC value
 }
 double xclGetWriteMaxBandwidthMBps(xclDeviceHandle handle)
 {
-  return 0;
+  return 9600.0 ; // Needs to be adjusted to SoC value
 }
 void xclSetProfilingNumberSlots(xclDeviceHandle handle, xclPerfMonType type, uint32_t numSlots)
 {
+  // No longer supported at this level
   return;
 }
 uint32_t xclGetProfilingNumberSlots(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -EINVAL;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->getProfilingNumberSlots(type);
 }
 void xclGetProfilingSlotName(xclDeviceHandle handle, xclPerfMonType type,
                              uint32_t slotnum, char* slotName, uint32_t length)
 {
-  return;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return;
+  if (!(drv->profiling))
+    return;
+  drv->profiling->getProfilingSlotName(type, slotnum, slotName, length);
 }
 size_t xclPerfMonClockTraining(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return 1; // Not yet enabled
 }
 size_t xclPerfMonStartCounters(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonStartCounters(type);
 }
 size_t xclPerfMonStopCounters(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonStopCounters(type);
 }
 size_t xclPerfMonReadCounters(xclDeviceHandle handle, xclPerfMonType type, xclCounterResults& counterResults)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonReadCounters(type, counterResults);
 }
 size_t xclPerfMonStartTrace(xclDeviceHandle handle, xclPerfMonType type, uint32_t startTrigger)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonStartTrace(type, startTrigger);
 }
 size_t xclPerfMonStopTrace(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonStopTrace(type);
 }
 uint32_t xclPerfMonGetTraceCount(xclDeviceHandle handle, xclPerfMonType type)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonGetTraceCount(type);
 }
 size_t xclPerfMonReadTrace(xclDeviceHandle handle, xclPerfMonType type, xclTraceResultsVector& traceVector)
 {
-  return 0;
+  ZYNQ::ZYNQShim *drv = ZYNQ::ZYNQShim::handleCheck(handle);
+  if (!drv)
+    return -ENODEV;
+  if (!(drv->profiling))
+    return -EINVAL;
+  return drv->profiling->xclPerfMonReadTrace(type, traceVector);
 }
 size_t xclDebugReadIPStatus(xclDeviceHandle handle, xclDebugReadType type,
                             void* debugResults)

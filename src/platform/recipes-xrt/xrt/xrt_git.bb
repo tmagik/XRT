@@ -20,7 +20,7 @@ S = "${WORKDIR}/git"
 inherit cmake pkgconfig
 
 # util-linux is for libuuid-dev.
-DEPENDS = "libdrm opencl-headers ocl-icd boost util-linux"
+DEPENDS = "libdrm opencl-headers ocl-icd boost util-linux git-replacement-native"
 RDEPENDS_${PN} = "bash ocl-icd boost"
 
 FILES_${PN}-dev += "opt/xilinx/xrt/include/* opt/xilinx/xrt/lib/*"
@@ -31,6 +31,9 @@ TARGET_CC_ARCH += "${LDFLAGS}"
 
 # libxdp.so and liboclxdp.so have no symlink
 INSANE_SKIP_${PN}-dev = "dev-elf"
+
+# executable skd depends on "xrt-dev" package
+INSANE_SKIP_${PN}-dev += "dev-deps"
 
 # TODO Add pkgconfig setting here
 

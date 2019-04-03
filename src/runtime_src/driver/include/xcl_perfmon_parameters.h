@@ -25,10 +25,6 @@
 #ifndef _PERFMON_PARAMETERS_H_
 #define _PERFMON_PARAMETERS_H_
 
-//#define PERFMON0_OFFSET                 0x100000
-//#define PERFMON1_OFFSET                 0x120000
-//#define PERFMON2_OFFSET                 0x010000
-
 /************************ AXI Stream FIFOs ************************************/
 
 /* Address offsets in core */
@@ -124,6 +120,10 @@
 #define XSAM_ACCEL_MIN_EXECUTION_CYCLES_UPPER_OFFSET 0xB4
 #define XSAM_ACCEL_MAX_EXECUTION_CYCLES_UPPER_OFFSET 0xB8
 #define XSAM_ACCEL_TOTAL_CU_START_UPPER_OFFSET       0xbc
+#define XSAM_BUSY_CYCLES_OFFSET                      0xC0
+#define XSAM_BUSY_CYCLES_UPPER_OFFSET                0xC4
+#define XSAM_MAX_PARALLEL_ITER_OFFSET                0xC8
+#define XSAM_MAX_PARALLEL_ITER_UPPER_OFFSET          0xCC
 
 /* SAM Trace Control Masks */
 #define XSAM_TRACE_STALL_SELECT_MASK    0x0000001c
@@ -140,6 +140,12 @@
 #define XSSPM_BUSY_CYCLES_OFFSET       0x90
 #define XSSPM_STALL_CYCLES_OFFSET      0x98
 #define XSSPM_STARVE_CYCLES_OFFSET     0xA0
+
+/********************* AXI Stream Protocol Checker (SPC) *********************/
+
+#define XSPC_PC_ASSERTED_OFFSET 0x0
+#define XSPC_CURRENT_PC_OFFSET  0x100
+#define XSPC_SNAPSHOT_PC_OFFSET 0x200
 
 /************************ APM Constant Definitions ****************************/
 
