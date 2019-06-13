@@ -23,6 +23,37 @@
 #include "xdp/rt_singleton.h"
 #include "xdp/profile/core/rt_profile.h"
 
+namespace {
+
+static bool
+is_hw_emulation()
+{
+  // Temporary work-around used to set the mDevice based on
+  // XCL_EMULATION_MODE=hw_emu.  Otherwise default is mSwEmDevice
+  static auto xem = std::getenv("XCL_EMULATION_MODE");
+  static bool hwem = xem ? std::strcmp(xem,"hw_emu")==0 : false;
+  return hwem;
+}
+
+static bool
+is_sw_emulation()
+{
+  // Temporary work-around used to set the mDevice based on
+  // XCL_EMULATION_MODE=hw_emu.  Otherwise default is mSwEmDevice
+  static auto xem = std::getenv("XCL_EMULATION_MODE");
+  static bool swem = xem ? std::strcmp(xem,"sw_emu")==0 : false;
+  return swem;
+}
+
+static bool
+is_emulation_mode()
+{
+  static bool val = is_sw_emulation() || is_hw_emulation();
+  return val;
+}
+
+}
+
 namespace xdp {
 
 bool isProfilingOn() {
@@ -98,9 +129,9 @@ event_status_to_profile_state(cl_int status)
  *
  */
 void
-cb_action_ndrange (xocl::event* event,cl_int status,const std::string& cu_name, cl_kernel kernel,
-                 std::string kname, std::string xname, size_t workGroupSize, const size_t* globalWorkDim,
-                 const size_t* localWorkDim, unsigned int programId)
+cb_action_ndrange(xocl::event* event,cl_int status,const std::string& cu_name, cl_kernel kernel,
+                  std::string kname, std::string xname, size_t workGroupSize, const size_t* globalWorkDim,
+                  const size_t* localWorkDim, unsigned int programId)
 {
     if (!isProfilingOn())
       return;
@@ -155,7 +186,8 @@ cb_action_ndrange (xocl::event* event,cl_int status,const std::string& cu_name, 
 }
 
 void
-cb_action_read (xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint64_t address, const std::string& bank, bool entire_buffer, size_t user_size, size_t user_offset)
+cb_action_read(xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint64_t address, const std::string& bank,
+               bool entire_buffer, size_t user_size, size_t user_offset)
 {
     if (!isProfilingOn())
       return;
@@ -169,6 +201,10 @@ cb_action_read (xocl::event* event,cl_int status, cl_mem buffer, size_t size, ui
       XOCL_DEBUGF("READ status: %d, event: %s, depend: %s\n", status, eventStr.c_str(), dependStr.c_str());
     }
 
+    // Catch if reading from P2P buffer
+    auto ext_flags = xocl::xocl(buffer)->get_ext_flags();
+    auto kind = (ext_flags & XCL_MEM_EXT_P2P_BUFFER) ? xdp::RTUtil::READ_BUFFER_P2P : xdp::RTUtil::READ_BUFFER;
+
     auto commandState = event_status_to_profile_state(status);
     auto queue = event->get_command_queue();
     auto deviceName = queue->get_device()->get_name();
@@ -177,16 +213,12 @@ cb_action_read (xocl::event* event,cl_int status, cl_mem buffer, size_t size, ui
     auto commandQueueId = event->get_command_queue()->get_uid();
     auto threadId = std::this_thread::get_id();
     double timestampMsec = (status == CL_COMPLETE) ? event->time_end() / 1e6 : 0.0;
-    size_t actual_size = 0;
-    if (entire_buffer) {
-      actual_size = size;
-    } else {
-      actual_size = user_size;
-    }
+
+    size_t actual_size = (entire_buffer) ? size : user_size;
 
     OCLProfiler::Instance()->getProfileManager()->logDataTransfer
       (reinterpret_cast<uint64_t>(buffer)
-       ,xdp::RTUtil::READ_BUFFER
+       ,kind
        ,commandState
        ,actual_size
        ,contextId
@@ -205,7 +237,7 @@ cb_action_read (xocl::event* event,cl_int status, cl_mem buffer, size_t size, ui
 
 void
 cb_action_map(xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint64_t address,
-                           const std::string& bank, cl_map_flags map_flags)
+              const std::string& bank, cl_map_flags map_flags)
 {
     if (!isProfilingOn())
       return;
@@ -254,7 +286,8 @@ cb_action_map(xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint
 }
 
 void
-cb_action_write (xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint64_t address, const std::string& bank)
+cb_action_write(xocl::event* event,cl_int status, cl_mem buffer, size_t size, uint64_t address, const std::string& bank,
+                bool entire_buffer, size_t user_size, size_t user_offset)
 {
     if (!isProfilingOn())
       return;
@@ -275,6 +308,10 @@ cb_action_write (xocl::event* event,cl_int status, cl_mem buffer, size_t size, u
       XOCL_DEBUGF("WRITE event: %s, depend: %s\n", eventStr.c_str(), dependStr.c_str());
     }
 
+    // Catch if writing to P2P buffer
+    auto ext_flags = xocl::xocl(buffer)->get_ext_flags();
+    auto kind = (ext_flags & XCL_MEM_EXT_P2P_BUFFER) ? xdp::RTUtil::WRITE_BUFFER_P2P : xdp::RTUtil::WRITE_BUFFER;
+
     auto commandState = event_status_to_profile_state(status);
     auto deviceName = device->get_name();
     auto contextId =  event->get_context()->get_uid();
@@ -283,11 +320,13 @@ cb_action_write (xocl::event* event,cl_int status, cl_mem buffer, size_t size, u
     auto threadId = std::this_thread::get_id();
     double timestampMsec = (status == CL_COMPLETE) ? event->time_end() / 1e6 : 0.0;
 
+    size_t actual_size = (entire_buffer) ? size : user_size;
+
     OCLProfiler::Instance()->getProfileManager()->logDataTransfer
       (reinterpret_cast<uint64_t>(buffer)
-       ,xdp::RTUtil::WRITE_BUFFER
+       ,kind
        ,commandState
-       ,size
+       ,actual_size
        ,contextId
        ,numDevices
        ,deviceName
@@ -311,8 +350,8 @@ cb_action_unmap (xocl::event* event,cl_int status, cl_mem buffer, size_t size, u
     auto queue = event->get_command_queue();
     auto device = queue->get_device();
 
-    // Catch if buffer is *not* resident on device; if so, then covered by NDRange migration
-    if (!xocl::xocl(buffer)->is_resident(device))
+    // Catch if buffer is *not* resident on device (covered by NDRange migration) or is P2P buffer
+    if (!xocl::xocl(buffer)->is_resident(device) || xocl::xocl(buffer)->is_p2p_memory())
       return;
 
     // Create string to specify event and its dependencies
@@ -359,30 +398,6 @@ cb_action_ndrange_migrate (xocl::event* event,cl_int status, cl_mem mem0, size_t
     if (!isProfilingOn() || (totalSize == 0))
       return;
 
-    //Fix for CR-1004188 Using of the static variable below does not work
-    //as intended. There is only one copy of migrateCount created for all ndrange migrate events
-    //We need to address following cases:
-    //1. For the case when no buffers are migrated by ndrange migrate
-    //   ==> we will not receive "running" but we will receive compelete, there will be an "END" entry in csv file
-    //       without corresponding "START" entry. sdx_analyze should drop the unmatched END
-    //2. For the case when n out of m buffers are migrated (n<=m)
-    //   ==> we will receive one callback for "running" and one callback for "complete", ie. we produce matching
-    //       start and end
-#if 0
-    // Ensure there are START/END pairs
-    // NOTE: When clEnqueueMigrateMemObjects is used, END events are received here, too
-    static int migrateCount = 0;
-    if (status == CL_RUNNING) {
-      migrateCount++;
-    }
-    else if (status == CL_COMPLETE) {
-      if (migrateCount > 0)
-        migrateCount--;
-      else
-        return;
-    }
-#endif
-
     // Create string to specify event and its dependencies
     std::string eventStr;
     std::string dependStr;
@@ -428,26 +443,6 @@ cb_action_migrate (xocl::event* event,cl_int status, cl_mem mem0, size_t totalSi
       return;
 
     auto commandState = event_status_to_profile_state(status);
-
-#if 0
-    // Report the first START and the last END
-    static int numOutstanding = 0;
-    if (commandState == xdp::RTUtil::SUBMIT) {
-      numOutstanding = 0;
-    }
-    else if (commandState == xdp::RTUtil::START) {
-   	  numOutstanding++;
-      XOCL_DEBUGF("action_migrate: START, outstanding = %d\n", numOutstanding);
-   	  //if (numOutstanding != 1)
-   	  //  return;
-    }
-    else if (commandState == xdp::RTUtil::END) {
-   	  numOutstanding--;
-      XOCL_DEBUGF("action_migrate: END, outstanding = %d\n", numOutstanding);
-   	  //if (numOutstanding != 0)
-   	  //  return;
-    }
-#endif
 
     // Create string to specify event and its dependencies
     std::string eventStr;
@@ -507,7 +502,13 @@ cb_action_copy(xocl::event* event, cl_int status, cl_mem src_buffer, cl_mem dst_
       XOCL_DEBUGF("COPY event: %s, depend: %s\n", eventStr.c_str(), dependStr.c_str());
     }
 
+    // Catch if copying to/from P2P buffer
     auto kind = (same_device) ? xdp::RTUtil::COPY_BUFFER : xdp::RTUtil::COPY_BUFFER_P2P;
+    auto src_ext_flags = xocl::xocl(src_buffer)->get_ext_flags();
+    auto dst_ext_flags = xocl::xocl(dst_buffer)->get_ext_flags();
+    if ((src_ext_flags & XCL_MEM_EXT_P2P_BUFFER) || (dst_ext_flags & XCL_MEM_EXT_P2P_BUFFER))
+      kind = xdp::RTUtil::COPY_BUFFER_P2P;
+
     auto commandState = event_status_to_profile_state(status);
     auto deviceName = device->get_name();
     auto contextId =  event->get_context()->get_uid();
@@ -574,31 +575,25 @@ cb_set_kernel_clock_freq(const std::string& device_name, unsigned int freq)
   OCLProfiler::Instance()->setKernelClockFreqMHz(device_name, freq);
 }
 
-void cb_reset(const xocl::xclbin& xclbin)
+void cb_reset(const axlf* xclbin)
 {
   auto profiler = OCLProfiler::Instance();
 
   // init flow mode
-  auto xclbin_target = xclbin.target();
-  if (xclbin_target == xocl::xclbin::target_type::bin) {
-    auto dsa = xclbin.dsa_name();
+  if (!is_emulation_mode()) {
+    auto dsa = std::string(reinterpret_cast<const char*>(xclbin->m_header.m_platformVBNV),64);
     // CR-964171: trace clock is 300 MHz on DDR4 systems (e.g., KU115 4DDR)
     // TODO: this is kludgy; replace this with getting info from feature ROM
     // http://confluence.xilinx.com/display/XIP/DSA+Feature+ROM+Proposal
     if(dsa.find("4ddr") != std::string::npos)
       profiler->getProfileManager()->setDeviceTraceClockFreqMHz(300.0);
     profiler->getPlugin()->setFlowMode(xdp::RTUtil::DEVICE);
-  } else if (xclbin_target == xocl::xclbin::target_type::csim) {
+  } else if (is_sw_emulation()) {
     profiler->getPlugin()->setFlowMode(xdp::RTUtil::CPU);
     // old and unsupported modes
     profiler->turnOffProfile(xdp::RTUtil::PROFILE_DEVICE);
-  } else if (xclbin_target == xocl::xclbin::target_type::cosim) {
-    profiler->getPlugin()->setFlowMode(xdp::RTUtil::COSIM_EM);
-    profiler->turnOffProfile(xdp::RTUtil::PROFILE_DEVICE);
-  } else if (xclbin_target == xocl::xclbin::target_type::hwem) {
+  } else if (is_hw_emulation()) {
     profiler->getPlugin()->setFlowMode(xdp::RTUtil::HW_EM);
-  } else if (xclbin_target == xocl::xclbin::target_type::x86) {
-  } else if (xclbin_target == xocl::xclbin::target_type::zynqps7) {
   } else {
     throw xocl::error(CL_INVALID_BINARY,"invalid xclbin region target");
   }
@@ -640,8 +635,16 @@ extern "C"
 void
 initXDPLib()
 {
-  (void)xdp::RTSingleton::Instance();
-  (void)xdp::OCLProfiler::Instance();
+  try {
+    (void)xdp::RTSingleton::Instance();
+    (void)xdp::OCLProfiler::Instance();
+  } catch (std::runtime_error& e) {
+    xrt::message::send(xrt::message::severity_level::XRT_WARNING, e.what());
+    // Don't register any of the callbacks.  Something went wrong during
+    //  initialization.
+    return ;
+  }
+
   if (xdp::OCLProfiler::Instance()->applicationProfilingOn())
     xdp::register_xocl_profile_callbacks();
 }

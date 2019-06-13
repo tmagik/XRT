@@ -23,7 +23,7 @@
 #include "xdp/profile/writer/base_profile.h"
 #include "xdp/profile/writer/base_trace.h"
 
-#include "driver/include/xcl_perfmon_parameters.h"
+#include "xcl_perfmon_parameters.h"
 
 #include <iostream>
 #include <sstream>
@@ -79,8 +79,8 @@ namespace xdp {
   // Log device counters
   // ***************************************************************************
 
-  void SummaryWriter::logDeviceCounters(std::string deviceName, std::string binaryName, xclPerfMonType type,
-      xclCounterResults& counterResults, uint64_t timeNsec, bool firstReadAfterProgram)
+  void SummaryWriter::logDeviceCounters(std::string deviceName, std::string binaryName, uint32_t programID,
+       xclPerfMonType type, xclCounterResults& counterResults, uint64_t timeNsec, bool firstReadAfterProgram)
   {
     // Number of monitor slots
     uint32_t numSlots = 0;
@@ -218,11 +218,14 @@ namespace xdp {
       double cuMaxExecCyclesMsec = (double) cuMaxExecCycles / deviceCyclesMsec;
       double cuMinExecCyclesMsec = (double) cuMinExecCycles / deviceCyclesMsec;
       uint32_t isDataflow = mPluginHandle->isAPCtrlChain(deviceName, cuName) ? 1 : 0;
+      std::string binaryInstance = binaryName + std::to_string(programID);
       //XDP_LOG("[RT_PROFILE] cuName : %s exec cycles : %d runtime %f \n", cuName.c_str(), cuExecCycles, cuRunTimeMsec);
-      mProfileCounters->logComputeUnitStats(cuName, kernelName, cuRunTimeMsec,
-                                            cuRunTimeAvgMsec, cuMaxExecCyclesMsec,
-                                            cuMinExecCyclesMsec, cuExecCount, kernelClockMhz,
-                                            isDataflow, cuMaxParallelIter);
+      // Don't log if not a valid stat
+      if (cuMaxParallelIter > 0)
+        mProfileCounters->logComputeUnitStats(cuName, kernelName, cuRunTimeMsec,
+                                              cuRunTimeAvgMsec, cuMaxExecCyclesMsec,
+                                              cuMinExecCyclesMsec, cuExecCount, kernelClockMhz,
+                                              isDataflow, cuMaxParallelIter, deviceName, binaryInstance);
     }
 #ifdef XDP_VERBOSE
     if (this->isTimelineTraceFileOn()) {
@@ -297,19 +300,22 @@ namespace xdp {
     std::string monitorName;
     RTUtil::monitorTypeToString(monitorType, monitorName);
 
-    auto readKind  = RTUtil::READ_BUFFER;
-    auto writeKind = RTUtil::WRITE_BUFFER;
+    double totalReadTimeMsec  = 0;
+    double totalWriteTimeMsec = 0;
     if (monitorType == RTUtil::MON_SHELL_KDMA) {
-      readKind  = RTUtil::COPY_BUFFER;
-      writeKind = RTUtil::COPY_BUFFER;
+      totalReadTimeMsec  += mProfileCounters->getBufferTransferTotalTime(RTUtil::COPY_BUFFER);
+      totalWriteTimeMsec += mProfileCounters->getBufferTransferTotalTime(RTUtil::COPY_BUFFER);
     }
     else if (monitorType == RTUtil::MON_SHELL_P2P) {
-      readKind  = RTUtil::COPY_BUFFER_P2P;
-      writeKind = RTUtil::COPY_BUFFER_P2P;
-    }
+      totalReadTimeMsec  += mProfileCounters->getBufferTransferTotalTime(RTUtil::COPY_BUFFER_P2P);
+      totalReadTimeMsec  += mProfileCounters->getBufferTransferTotalTime(RTUtil::READ_BUFFER_P2P);
 
-    double totalReadTimeMsec  = mProfileCounters->getBufferTransferTotalTime(readKind);
-    double totalWriteTimeMsec = mProfileCounters->getBufferTransferTotalTime(writeKind);
+      totalWriteTimeMsec += mProfileCounters->getBufferTransferTotalTime(RTUtil::COPY_BUFFER_P2P);
+      totalWriteTimeMsec += mProfileCounters->getBufferTransferTotalTime(RTUtil::WRITE_BUFFER_P2P);
+    } else {
+      totalReadTimeMsec  += mProfileCounters->getBufferTransferTotalTime(RTUtil::READ_BUFFER);
+      totalWriteTimeMsec += mProfileCounters->getBufferTransferTotalTime(RTUtil::WRITE_BUFFER);
+    }
 
     //
     // Shell monitors: KDMA/XDMA/P2P

@@ -25,6 +25,8 @@
 #include "xrt/scheduler/scheduler.h"
 #include "xrt/util/config_reader.h"
 
+#include "core/common/xclbin_parser.h"
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -46,7 +48,7 @@ to_hex(void* addr)
 static void
 unaligned_message(void* addr)
 {
-  xrt::message::send(xrt::message::severity_level::WARNING,
+  xrt::message::send(xrt::message::severity_level::XRT_WARNING,
                      "unaligned host pointer '"
                      + to_hex(addr)
                      + "' detected, this leads to extra memcpy");
@@ -54,7 +56,7 @@ unaligned_message(void* addr)
 
 static void
 default_allocation_message(const xocl::device* device,const xocl::memory* mem,
-                           const xrt::device::BufferObjectHandle& boh, bool err=false)
+                           const xrt::device::BufferObjectHandle& boh)
 {
   if (!boh)
     return;
@@ -77,7 +79,26 @@ default_allocation_message(const xocl::device* device,const xocl::memory* mem,
   if (xrt::config::get_feature_toggle("Runtime.strict_bank_rule"))
     throw std::runtime_error(str.str());
   else
-    xrt::message::send(xrt::message::severity_level::WARNING,str.str());
+    xrt::message::send(xrt::message::severity_level::XRT_WARNING,str.str());
+}
+
+static void
+default_bad_allocation_message(const xocl::device* device,const xocl::memory* mem)
+{
+  std::stringstream str;
+  str << "Host buffer (" << mem->get_uid() << ") "
+      << "has no bank assignment and is not used as kernel argument "
+      << "before first enqueue operation.";
+  xrt::message::send(xrt::message::severity_level::XRT_ERROR,str.str());
+}
+
+static void
+host_copy_message(const xocl::memory* dst, const xocl::memory* src)
+{
+  std::stringstream str;
+  str << "Reverting to host copy for src buffer(" << src->get_uid() << ") "
+      << "to dst buffer(" << dst->get_uid() << ")";
+  xrt::message::send(xrt::message::severity_level::XRT_WARNING,str.str());
 }
 
 
@@ -164,12 +185,24 @@ is_sw_emulation()
   return swem;
 }
 
-//static bool
-//is_emulation_mode()
-//{
-//  static bool val = is_sw_emulation() || is_hw_emulation();
-//  return val;
-//}
+static std::vector<uint64_t>
+get_xclbin_cus(const xocl::device* device)
+{
+  if (is_sw_emulation()) {
+    auto xclbin = device->get_xclbin();
+    return xclbin.cu_base_address_map();
+  }
+
+  return xrt_core::xclbin::get_cus(device->get_axlf());
+}
+
+
+XOCL_UNUSED static bool
+is_emulation_mode()
+{
+  static bool val = is_sw_emulation() || is_hw_emulation();
+  return val;
+}
 
 static void
 init_scheduler(xocl::device* device)
@@ -179,16 +212,13 @@ init_scheduler(xocl::device* device)
   if (!program)
     throw xocl::error(CL_INVALID_PROGRAM,"Cannot initialize MBS before program is loadded");
 
-  auto xclbin = device->get_xclbin();
-  auto binary = xclbin.binary(); // ::xclbin::binary
-  auto binary_data = binary.binary_data();
-  auto header = reinterpret_cast<const xclBin *>(binary_data.first);
+  auto axlf = device->get_axlf();
   if (is_sw_emulation()) {
-    auto cu2addr = xclbin.cu_base_address_map();
+    auto cu2addr = get_xclbin_cus(device);
     xrt::sws::init(device->get_xrt_device(),cu2addr);
   }
   else {
-    xrt::scheduler::init(device->get_xrt_device(),header);
+    xrt::scheduler::init(device->get_xrt_device(),axlf);
   }
 }
 
@@ -230,8 +260,7 @@ alloc(memory* mem, memidx_type memidx)
     return boh;
   }
 
-  auto p2p_flag = (mem->get_ext_flags() >> 30) & 0x1;
-  auto domain = p2p_flag
+  auto domain = mem->is_p2p_memory()
     ? xrt::device::memoryDomain::XRT_DEVICE_P2P_RAM
     : xrt::device::memoryDomain::XRT_DEVICE_RAM;
 
@@ -279,9 +308,11 @@ get_stream(xrt::device::stream_flags flags, xrt::device::stream_attrs attrs, con
 {
   uint64_t route = (uint64_t)-1;
   uint64_t flow = (uint64_t)-1;
+  int rc = 0;
 
   if(ext && ext->param) {
     auto kernel = xocl::xocl(ext->kernel);
+
     auto& kernel_name = kernel->get_name_from_constructor();
     auto memidx = m_xclbin.get_memidx_from_arg(kernel_name,ext->flags,conn);
     auto mems = m_xclbin.get_mem_topology();
@@ -313,12 +344,15 @@ get_stream(xrt::device::stream_flags flags, xrt::device::stream_attrs attrs, con
   }
 
   if (flags & CL_STREAM_READ_ONLY)
-    return m_xdevice->createReadStream(flags, attrs, route, flow, stream);
+    rc = m_xdevice->createReadStream(flags, attrs, route, flow, stream);
   else if (flags & CL_STREAM_WRITE_ONLY)
-    return m_xdevice->createWriteStream(flags, attrs, route, flow, stream);
+    rc = m_xdevice->createWriteStream(flags, attrs, route, flow, stream);
   else
     throw xocl::error(CL_INVALID_OPERATION,"Unknown stream type specified");
-  return -1;
+
+  if(rc)
+    throw xocl::error(CL_INVALID_OPERATION,"Create stream failed");
+  return rc;
 }
 
 int
@@ -332,16 +366,16 @@ close_stream(xrt::device::stream_handle stream, int connidx)
 
 ssize_t
 device::
-write_stream(xrt::device::stream_handle stream, const void* ptr, size_t offset, size_t size, xrt::device::stream_xfer_req* req)
+write_stream(xrt::device::stream_handle stream, const void* ptr, size_t size, xrt::device::stream_xfer_req* req)
 {
-  return m_xdevice->writeStream(stream, ptr, offset, size, req);
+  return m_xdevice->writeStream(stream, ptr, size, req);
 }
 
 ssize_t
 device::
-read_stream(xrt::device::stream_handle stream, void* ptr, size_t offset, size_t size, xrt::device::stream_xfer_req* req)
+read_stream(xrt::device::stream_handle stream, void* ptr, size_t size, xrt::device::stream_xfer_req* req)
 {
-  return m_xdevice->readStream(stream, ptr, offset, size, req);
+  return m_xdevice->readStream(stream, ptr, size, req);
 }
 
 xrt::device::stream_buf
@@ -566,9 +600,15 @@ allocate_buffer_object(memory* mem)
   // Else just allocated on any bank
   XOCL_DEBUG(std::cout,"memory(",mem->get_uid(),") allocated on device(",m_uid,") in default bank\n");
 
-  auto boh = alloc(mem);
-  default_allocation_message(this,mem,boh);
-  return boh;
+  try {
+    auto boh = alloc(mem);
+    default_allocation_message(this,mem,boh);
+    return boh;
+  }
+  catch (const std::bad_alloc& ex) {
+    default_bad_allocation_message(this,mem);
+    throw;
+  }
 }
 
 xrt::device::BufferObjectHandle
@@ -612,6 +652,14 @@ free(const memory* mem)
                              + ") is not allocated on device("
                              + std::to_string(get_uid()) + ")");
   m_memobjs.erase(itr);
+}
+
+bool
+device::
+is_imported(const memory* mem) const
+{
+  auto boh = mem->get_buffer_object_or_null(this);
+  return boh ? m_xdevice->is_imported(boh) : false;
 }
 
 xrt::device::BufferObjectHandle
@@ -873,63 +921,79 @@ copy_buffer(memory* src_buffer, memory* dst_buffer, size_t src_offset, size_t ds
 {
   auto xdevice = get_xrt_device();
 
-  if (!get_num_cdmas() || is_sw_emulation()) {
+  // Check if any of the buffers are imported
+  bool imported = is_imported(src_buffer) || is_imported(dst_buffer);
+
+  // Copy via driver if p2p or device has kdma
+  if (!is_sw_emulation() && (imported || get_num_cdmas())) {
+    auto cppkt = xrt::command_cast<ert_start_copybo_cmd*>(cmd);
+    auto src_boh = src_buffer->get_buffer_object(this);
+    auto dst_boh = dst_buffer->get_buffer_object(this);
+    xdevice->fill_copy_pkt(dst_boh,src_boh,size,dst_offset,src_offset,cppkt);
+
+    cmd->start();    // done() called by scheduler on success
+    try {
+      cmd->execute();  // throws on error
+      XOCL_DEBUG(std::cout,"xocl::device::copy_buffer scheduled kdma copy\n");
+      // Driver fills dst buffer same as migrate_buffer does, hence dst buffer
+      // is resident after KDMA is done even if host does explicitly migrate.
+      dst_buffer->set_resident(this);
+      return;
+    }
+    catch (...) {
+      host_copy_message(dst_buffer,src_buffer);
+    }
+  }
+
+  // Copy via host of local buffers and no kdma and neither buffer is p2p (no shadow buffer in host)
+  if (!imported && !src_buffer->is_p2p_memory() && !dst_buffer->is_p2p_memory()) {
+    // non p2p BOs then copy through host
     auto cb = [this](memory* sbuf, memory* dbuf, size_t soff, size_t doff, size_t sz,const cmd_type& c) {
-      c->start();
-      char* hbuf_src = static_cast<char*>(map_buffer(sbuf,CL_MAP_READ,soff,sz,nullptr));
-      char* hbuf_dst = static_cast<char*>(map_buffer(dbuf,CL_MAP_WRITE_INVALIDATE_REGION,doff,sz,nullptr));
-      std::memcpy(hbuf_dst,hbuf_src,sz);
-      unmap_buffer(sbuf,hbuf_src);
-      unmap_buffer(dbuf,hbuf_dst);
-      c->done();
+      try {
+        c->start();
+        char* hbuf_src = static_cast<char*>(map_buffer(sbuf,CL_MAP_READ,soff,sz,nullptr));
+        char* hbuf_dst = static_cast<char*>(map_buffer(dbuf,CL_MAP_WRITE_INVALIDATE_REGION,doff,sz,nullptr));
+        std::memcpy(hbuf_dst,hbuf_src,sz);
+        unmap_buffer(sbuf,hbuf_src);
+        unmap_buffer(dbuf,hbuf_dst);
+        c->done();
+      }
+      catch (const std::exception& ex) {
+        c->error(ex);
+      }
     };
     XOCL_DEBUG(std::cout,"xocl::device::copy_buffer schedules host copy\n");
     xdevice->schedule(cb,xrt::device::queue_type::misc,src_buffer,dst_buffer,src_offset,dst_offset,size,cmd);
     return;
   }
 
-  // CDMA.  TODO, this needs to be done at lower shim level, not in OCL land
-  auto sk_cmd = xrt::command_cast<ert_start_kernel_cmd*>(cmd);
-  auto packet = cmd->get_packet();
-  size_t offset = 1; // packet offset past header
-
-  auto maxidx = get_num_cus() + get_num_cdmas();
-
-  for (auto cu_idx=get_num_cus(); cu_idx<maxidx; ++cu_idx) {
-    auto mask_idx = cu_idx/32;
-    auto cu_mask_idx = cu_idx - mask_idx*32;
-    packet[offset + mask_idx] |= 1 << cu_mask_idx;
+  // Ideally all cases should be handled above regardless of flow
+  // target and buffer type.  Need to enhance emulation drivers to
+  // ensure this being the case.
+  if (is_sw_emulation()) {
+    // Old code path for p2p buffer xclEnqueueP2PCopy
+    if (imported) {
+      // old code path for p2p buffer
+      cmd->start();
+      copy_p2p_buffer(src_buffer,dst_buffer,src_offset,dst_offset,size);
+      cmd->done();
+      return;
+    }
   }
-  sk_cmd->extra_cu_masks = maxidx/32;
-  sk_cmd->opcode = ERT_START_CU;
-  offset += maxidx/32 + 1; // packet offset past cumasks
 
-  // Insert copy command content
-  auto src_boh = src_buffer->get_buffer_object(this);
-  auto src_addr = xdevice->getDeviceAddr(src_boh) + src_offset;
-  auto dst_boh = dst_buffer->get_buffer_object(this);
-  auto dst_addr = xdevice->getDeviceAddr(dst_boh) + dst_offset;
-
-  packet[offset++] = 0; // 0x0 reserved CU AP_CTRL
-  packet[offset++] = 0; // 0x4 reserved CU GIE
-  packet[offset++] = 0; // 0xc reserved CU IER
-  packet[offset++] = 0; // 0xc reserved CU ISR
-  packet[offset++] = src_addr;                       // 0x10
-  packet[offset++] = (src_addr >> 32) & 0xFFFFFFFF;  // 0x14
-  packet[offset++] = 0;                              // 0x18
-  packet[offset++] = dst_addr;                       // 0x1c
-  packet[offset++] = (dst_addr >> 32) & 0xFFFFFFFF;  // 0x20
-  packet[offset++] = 0;                              // 0x24
-  packet[offset++] = (size*8) / 512;                 // 0x28 units of 512 bits
-
-  sk_cmd->count = offset-1; // number of words in payload (excludes header)
-  XOCL_DEBUGF("xocl::device::copy_buffer schedules cdma(%p,%p,%d)\n",dst_addr,src_addr,size);
-  cmd->start();
-  xrt::scheduler::schedule(cmd);
-
-  // KDMA fills dst buffer same as migrate_buffer does, hence dst buffer
-  // is resident after KDMA is done even if host does explicitly migrate.
-  dst_buffer->set_resident(this);
+  // Could not copy
+  std::stringstream err;
+  err << "Copying of buffers failed.\n";
+  if (is_imported(src_buffer))
+    err << "The src buffer is imported from another device\n";
+  if (is_imported(dst_buffer))
+    err << "The dst buffer is imported from another device\n";
+  if (src_buffer->is_p2p_memory())
+    err << "The src buffer is a p2p buffer\n";
+  if (dst_buffer->is_p2p_memory())
+    err << "The dst buffer is a p2p buffer\n";
+  err << "The targeted device has " << get_num_cdmas() << " KDMA kernels\n";
+  throw std::runtime_error(err.str());
 }
 
 void
@@ -939,7 +1003,16 @@ copy_p2p_buffer(memory* src_buffer, memory* dst_buffer, size_t src_offset, size_
   auto xdevice = get_xrt_device();
   auto src_boh = src_buffer->get_buffer_object(this);
   auto dst_boh = dst_buffer->get_buffer_object(this);
-  xdevice->copy(dst_boh, src_boh, size, dst_offset, src_offset);
+  auto rv = xdevice->copy(dst_boh, src_boh, size, dst_offset, src_offset);
+  if (rv.get<int>() == 0)
+    return;
+
+  // Could not copy
+  std::stringstream err;
+  err << "copy_p2p_buffer failed "
+      << "src_buffer " << src_buffer->get_uid() << ") "
+      << "dst_buffer(" << dst_buffer->get_uid() << ")";
+  throw std::runtime_error(err.str());
 }
 
 void
@@ -1048,28 +1121,6 @@ write_register(memory* mem, size_t offset,const void* ptr, size_t size)
   if (!(mem->get_flags() & CL_MEM_REGISTER_MAP))
     throw xocl::error(CL_INVALID_OPERATION,"write_register requires mem object with CL_MEM_REGISTER_MAP");
   get_xrt_device()->write_register(offset,ptr,size);
-#if 0
-  auto cmd = std::make_shared<xrt::command>(get_xrt_device(),ERT_WRITE);
-  auto packet = cmd->get_packet();
-  auto idx = packet.size() + 1; // past header is start of payload
-  auto addr = offset;
-  auto value = reinterpret_cast<const uint32_t*>(ptr);
-
-  while (size>0) {
-    packet[idx++] = addr;
-    packet[idx++] = *value;
-    ++value;
-    addr+=4;
-    size-=4;
-  }
-
-  auto ecmd = xrt::command_cast<ert_packet*>(cmd);
-  ecmd->type = ERT_KDS_LOCAL;
-  ecmd->count = packet.size() - 1; // substract header
-
-  xrt::scheduler::schedule(cmd);
-  cmd->wait();
-#endif
 }
 
 void
@@ -1093,8 +1144,8 @@ load_program(program* program)
   if (binary.debug_data().first)
     xrt::hal::load_xdp();
 
-  xocl::debug::reset(m_xclbin);
-  xocl::profile::reset(m_xclbin);
+  xocl::debug::reset(get_axlf());
+  xocl::profile::reset(get_axlf());
 
   // validatate target binary for target device and set the xrt device
   // according to target binary this is likely temp code that is
@@ -1174,9 +1225,11 @@ load_program(program* program)
   // isn't possible, we *must* iterator symbols explicitly
   clear_cus();
   m_cu_memidx = -2;
+  auto cu2addr = get_xclbin_cus(this);
   for (auto symbol : m_xclbin.kernel_symbols()) {
     for (auto& inst : symbol->instances) {
-      add_cu(std::make_unique<compute_unit>(symbol,inst.name,this));
+      if (auto cu = compute_unit::create(symbol,inst,this,cu2addr))
+        add_cu(std::move(cu));
     }
   }
 
@@ -1204,6 +1257,7 @@ bool
 device::
 acquire_context(const compute_unit* cu, bool shared) const
 {
+  std::lock_guard<std::mutex> lk(m_mutex);
   if (cu->m_context_type != compute_unit::context_type::none)
     return true;
 
@@ -1252,6 +1306,15 @@ get_xclbin() const
   return m_xclbin;
 }
 
+const axlf*
+device::
+get_axlf() const
+{
+  assert(!m_active || m_active->get_xclbin(this)==m_xclbin);
+  auto binary = m_xclbin.binary();
+  auto binary_data = binary.binary_data();
+  return reinterpret_cast<const axlf*>(binary_data.first);
+}
 
 unsigned short
 device::

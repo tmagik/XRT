@@ -238,6 +238,11 @@ namespace xdp {
     return mLogger->getMigrateMemCalls();
   }
 
+  int RTProfile::getHostP2PTransfers() const
+  {
+    return mLogger->getHostP2PTransfers();
+  }
+
   const std::set<std::thread::id>& RTProfile::getThreadIds()
   {
     return mLogger->getThreadIds();
@@ -280,10 +285,10 @@ namespace xdp {
   // External access to writer
   // ***************************************************************************
 
-  void RTProfile::logDeviceCounters(std::string deviceName, std::string binaryName, xclPerfMonType type,
-      xclCounterResults& counterResults, uint64_t timeNsec, bool firstReadAfterProgram)
+  void RTProfile::logDeviceCounters(std::string deviceName, std::string binaryName, uint32_t programId,
+      xclPerfMonType type, xclCounterResults& counterResults, uint64_t timeNsec, bool firstReadAfterProgram)
   {
-    mWriter->logDeviceCounters(deviceName, binaryName, type, counterResults, timeNsec, firstReadAfterProgram);
+    mWriter->logDeviceCounters(deviceName, binaryName, programId, type, counterResults, timeNsec, firstReadAfterProgram);
   }
 
   void RTProfile::writeAPISummary(ProfileWriterI* writer) const

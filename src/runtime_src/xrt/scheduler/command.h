@@ -17,7 +17,7 @@
 #ifndef xrt_command_h_
 #define xrt_command_h_
 
-#include "driver/include/ert.h"
+#include "ert.h"
 #include "xrt/util/regmap.h"
 #include "xrt/device/device.h"
 
@@ -213,6 +213,12 @@ public:
    */
   virtual void
   done() const {}
+
+  /**
+   * Client call back for command error
+   */
+  virtual void
+  error(const std::exception&) const {}
 
 public:
 

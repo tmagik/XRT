@@ -25,7 +25,8 @@
 
 #include "xrt/device/device.h"
 
-#include <unistd.h>
+#include "core/common/memalign.h"
+
 #include <map>
 
 namespace xocl {
@@ -128,7 +129,7 @@ public:
   bool
   is_p2p_memory() const
   {
-    return (m_ext_flags >> 30) & 0x1 ? true : false;
+    return m_ext_flags & XCL_MEM_EXT_P2P_BUFFER;
   }
 
   // Derived classes accessors
@@ -486,7 +487,7 @@ public:
 
     if (flags & (CL_MEM_COPY_HOST_PTR | CL_MEM_ALLOC_HOST_PTR))
       // allocate sufficiently aligned memory and reassign m_host_ptr
-      if (posix_memalign(&m_host_ptr,alignment,sz))
+      if (xrt_core::posix_memalign(&m_host_ptr,alignment,sz))
         throw error(CL_MEM_OBJECT_ALLOCATION_FAILURE);
     if (flags & CL_MEM_COPY_HOST_PTR && host_ptr)
       std::memcpy(m_host_ptr,host_ptr,sz);

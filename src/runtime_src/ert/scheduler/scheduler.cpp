@@ -19,7 +19,7 @@
  */
 
 #ifndef ERT_HW_EMU
-#include "driver/include/ert.h"
+#include "core/include/ert.h"
 #else
 #include "ert.h"
 #endif
@@ -100,7 +100,7 @@ static const u32 AP_CTRL_NONE  = 2;
 static const u32 AP_CTRL_ME    = 3;
 
 ////////////////////////////////////////////////////////////////
-// Extensions to driver/include/ert.h
+// Extensions to core/include/ert.h
 ////////////////////////////////////////////////////////////////
 const addr_type STATUS_REGISTER_ADDR[4] =
 {
@@ -240,7 +240,7 @@ struct bitset_type
 // If this assert fails, then ert_parameters is out of sync with
 // the board support package header files.
 #ifndef ERT_HW_EMU
-static_assert(ERT_INTC_ADDR==XPAR_INTC_SINGLE_BASEADDR,"update driver/include/ert.h");
+static_assert(ERT_INTC_ADDR==XPAR_INTC_SINGLE_BASEADDR,"update core/include/ert.h");
 #endif
 
 // Marker for invalid index
@@ -251,7 +251,7 @@ const size_type no_index = std::numeric_limits<size_type>::max();
 // Statically allcoated array size is reduced in debug otherwise
 // there is not enough space for compiled firmware
 ////////////////////////////////////////////////////////////////
-#ifdef ERT_DEBUG
+#ifdef ERT_VERBOSE
 const  size_type max_slots                  = 32;   // size of statically allocated array
 #else
 const  size_type max_slots                  = 128;  // size of statically allocated array
@@ -260,7 +260,7 @@ static size_type num_slots                  = 16;   // actual number of slots
 static size_type num_slot_masks             = 1;    // (num_slots-1>>5)+1;
 
 // Max number of compute units
-#ifdef ERT_DEBUG
+#ifdef ERT_VERBOSE
 const  size_type max_cus                    = 32;   // size of statically allocated array
 #else
 const  size_type max_cus                    = 128;  // size of statically allocated array
@@ -710,7 +710,7 @@ start_cu(size_type slot_idx)
   for (size_type cu_idx=0; cu_idx<num_cus; ++cu_idx) {
     if (cus.test(cu_idx) && !cu_status.test(cu_idx)) {
       ERT_DEBUGF("start_cu cu(%d) for slot_idx(%d)\n",cu_idx,slot_idx);
-      ERT_ASSERT(read_reg(cu_idx_to_addr(cu_idx))==4,"cu not ready");
+      ERT_ASSERT(read_reg(cu_idx_to_addr(cu_idx))==AP_IDLE,"cu not ready");
       // cudma in 5.1 DSAs has a bug and supports at most 127 word copy
       // excluding the 4 control words
       if (cu_dma_enabled && (cu_dma_52 || regmap_size(slot.header_value)<(127+4))) {
@@ -787,8 +787,7 @@ check_cu(size_type cu_idx, bool wait=false)
 
   // check if done
   do {
-    // done is indicated by AP_DONE(2) alone or by AP_DONE(2) | AP_IDLE(4)
-    if (read_reg(cu_addr) & (AP_DONE|AP_IDLE)) {
+    if (read_reg(cu_addr) & AP_DONE) {
       // toogle cu status bit, it is now free
       cu_status.toggle(cu_idx);
       cu_slot_usage[cu_idx] = no_index; // reset slot index
@@ -1136,7 +1135,7 @@ scheduler_loop()
           continue; // CU is not used
 
         auto cuvalue = read_reg(cu_idx_to_addr(cuidx));
-        if (!(cuvalue & (AP_DONE | AP_IDLE)))
+        if (!(cuvalue & AP_DONE))
           continue;
 
         cu_status.toggle(cuidx); // disable polling until host re-enables

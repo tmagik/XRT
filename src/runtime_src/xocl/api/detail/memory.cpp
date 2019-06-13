@@ -95,7 +95,7 @@ validHostPtrOrError(cl_mem_flags flags, const void* host_ptr)
   // CL_INVALID_HOST_PTR if host_ptr is NULL and CL_MEM_EXT_PTR_XILINX is set
   // In this case host_ptr is actually a ptr to some struct
   if (!host_ptr && (flags & CL_MEM_EXT_PTR_XILINX))
-    throw error(CL_INVALID_HOST_PTR,"host_ptr may not be nullptr when CL_ME_EXT_PTR_XILINX is specified");
+    throw error(CL_INVALID_HOST_PTR,"host_ptr may not be nullptr when CL_MEM_EXT_PTR_XILINX is specified");
 
   // CL_INVALID_HOST_PTR if host_ptr is NULL and CL_MEM_USE_HOST_PTR
   // or CL_MEM_COPY_HOST_PTR are set in flags or if host_ptr is not
@@ -112,6 +112,8 @@ validHostPtrOrError(cl_mem_flags flags, const void* host_ptr)
       if (std::bitset<12>(ext_flags & ddr_bank_mask).count() > 1)
        throw xocl::error(CL_INVALID_VALUE,"Multiple bank flags specified");
     }
+    if (bool(ubuf) && bool(ext_flags & XCL_MEM_EXT_P2P_BUFFER))
+       throw error(CL_INVALID_HOST_PTR,"host_ptr with P2P buffer flags specified");
   }
 }
 
