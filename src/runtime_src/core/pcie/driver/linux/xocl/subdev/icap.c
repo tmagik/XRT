@@ -2870,7 +2870,7 @@ static int icap_verify_signature(struct icap *icap,
 {
 	int ret = 0;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0) && !defined(__riscv)
 #define	SYS_KEYS	((void *)1UL)
 	ret = verify_pkcs7_signature(data, data_len, sig, sig_len,
 		(icap->sec_level == ICAP_SEC_SYSTEM) ? SYS_KEYS : icap_keys,
@@ -2882,7 +2882,7 @@ static int icap_verify_signature(struct icap *icap,
 #else
 	ret = -EOPNOTSUPP;
 	ICAP_ERR(icap,
-		"signature verification is not supported with < 4.7.0 kernel");
+		"signature verification is not supported with < 4.7.0 or RiscV kernel");
 #endif
 	return ret;
 }
@@ -3355,8 +3355,12 @@ static int icap_probe(struct platform_device *pdev)
 			ICAP_ERR(icap, "create icap keyring failed: %d", ret);
 			goto failed;
 		}
+#if defined(__riscv) /* no efi secure boot yet */
+		icap->sec_level = ICAP_SEC_NONE;
+#else
 		icap->sec_level = efi_enabled(EFI_SECURE_BOOT) ?
 			ICAP_SEC_SYSTEM : ICAP_SEC_NONE;
+#endif
 	}
 
 	icap->cache_expire_secs = ICAP_DEFAULT_EXPIRE_SECS;

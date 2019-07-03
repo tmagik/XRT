@@ -64,6 +64,8 @@
 #define qdma_waitq_wait_event		wait_event_interruptible
 #define qdma_waitq_wait_event_timeout	wait_event_interruptible_timeout
 
+#endif /* swaitq */
+
 /* timer */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
 #define qdma_timer_setup(timer, fp_handler, data) \
